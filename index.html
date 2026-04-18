@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="theme-color" content="#1a2744">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>은혜 회계 - 교회 재정 관리</title>
+<link rel="manifest" href="manifest.json">
+
+<!-- Firebase -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut, onAuthStateChanged, GoogleAuthProvider, signInWithRedirect, getRedirectResult } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, collection, doc, addDoc, getDocs, updateDoc, deleteDoc, query, where, orderBy, onSnapshot, setDoc, getDoc, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyDFYmPKGMAARiWcsHlLFGJLaQXoeLSi8iE",
+  authDomain: "church-accounting-fbf26.firebaseapp.com",
+  projectId: "church-accounting-fbf26",
+  storageBucket: "church-accounting-fbf26.firebasestorage.app",
+  messagingSenderId: "731415047963",
+  appId: "1:731415047963:web:5ef8db4154e535baa42dbe"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+// ============================================================
+// 상태 관리
+// ============================================================
+let currentUser = null;
+let currentDept = 'all'; // 'all' | 'student' | 'praise'
+let currentView = 'dashboard'; // dashboard | transactions | budget | reports
+let transactions = [];
+let budgets = {};
+let unsubscribe = null;
+
+const DEPTS = {
+  student: { label: '학생부', color: '#4f86f7', icon: '📚' },
+  praise:  { label: '학생찬양팀', color: '#f7934f', icon: '🎵' },
+};
+
+// ============================================================
+// Auth 상태
+// ============================================================
+onAuthStateChanged(auth, async user => {
+  if (user) {
+    currentUser = user;
+    document.getElementById('auth-screen').style.display = 'none';
+    document.getElementById('app-screen').style.display = 'flex';
+    document.getElementById('user-email').textContent = user.email;
+    initApp();
+  } else {
+    currentUser = null;
+    document.getElementById('auth-screen').style.display = 'flex';
+    document.getElementById('app-screen').style.display = 'none';
+    if (unsubscribe) unsubscribe();
+  }
+});
+
+getRedirectResult(auth).catch(() => {});
+
+// ============================================================
+// 앱 초기화
+// ============================================================
+function initApp() {
+  loadBudgets();
+  subscribeTransactions();
+}
+
+function subscribeTransactions() {
+  if (unsubscribe) unsubscribe();
+  const q = query(collection(db, 'transactions'), orderBy('date', 'desc'));
+  unsubscribe = onSnapshot(q, snap => {
+    transactions = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    renderAll();
+  });
+}
+
+async function loadBudgets() {
+  const snap = await getDoc(doc(db, 'settings', 'budgets'));
+  if (snap.exists()) budgets = snap.data();
+  renderAll();
+}
+
+// ============================================================
+// 거래 CRUD
+// ============================================================
+async function addTransaction(data) {
+  data.createdAt = Timestamp.now();
+  data.date = Timestamp.fromDate(new Date(data.date));
+  await addDoc(collection(db, 'transactions'), data);
+}
+
+async function deleteTransaction(id) {
+  if (!confirm('삭제하시겠습니까?')) return;
+  await deleteDoc(doc(db, 'transactions', id));
+}
+
+async function saveBudgets(data) {
+  await setDoc(doc(db, 'settings', 'budgets'), data);
+  budgets = data;
+  renderAll();
+  showToast('예산이 저장되었습니다.');
+}
+
+// ============================================================
+// 렌더링
+// ============================================================
+function getFiltered() {
+  if (currentDept === 'all') return transactions;
+  return transactions.filter(t => t.dept === currentDept);
+}
+
+function calcSummary(list) {
+  const income  = list.filter(t => t.type === 'income').reduce((s, t) => s + t.amount, 0);
+  const expense = list.filter(t => t.type === 'expense').reduce((s, t) => s + t.amount, 0);
+  return { income, expense, balance: income - expense };
+}
+
+function fmt(n) {
+  return Number(n).toLocaleString('ko-KR') + '원';
+}
+
+function fmtDate(ts) {
+  if (!ts) return '';
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  return d.toLocaleDateString('ko-KR', { month: '2-digit', day: '2-digit' });
+}
+
+function fmtDateFull(ts) {
+  if (!ts) return '';
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  return d.toLocaleDateString('ko-KR', { year: 'numeric', month: '2-digit', day: '2-digit' });
+}
+
+function renderAll() {
+  updateDeptTabs();
+  if (currentView === 'dashboard') renderDashboard();
+  else if (currentView === 'transactions') renderTransactions();
+  else if (currentView === 'budget') renderBudget();
+  else if (currentView === 'reports') renderReports();
+}
+
+function updateDeptTabs() {
+  document.querySelectorAll('.dept-tab').forEach(el => {
+    el.classList.toggle('active', el.dataset.dept === currentDept);
+  });
+}
+
+// --- Dashboard ---
+function renderDashboard() {
+  const filtered = getFiltered();
+  const s = calcSummary(filtered);
+
+  // Per-dept summaries
+  let deptCards = '';
+  for (const [key, info] of Object.entries(DEPTS)) {
+    const ds = calcSummary(transactions.filter(t => t.dept === key));
+    deptCards += `
+      <div class="dept-card" style="--dept-color:${info.color}" onclick="switchDept('${key}')">
+        <div class="dept-card-header">${info.icon} ${info.label}</div>
+        <div class="dept-card-balance">${fmt(ds.balance)}</div>
+        <div class="dept-card-row"><span>수입</span><span class="inc">+${fmt(ds.income)}</span></div>
+        <div class="dept-card-row"><span>지출</span><span class="exp">-${fmt(ds.expense)}</span></div>
+      </div>`;
+  }
+
+  // Recent 5
+  const recent = filtered.slice(0, 5);
+  const recentHtml = recent.length ? recent.map(t => txRow(t)).join('') 
+    : '<div class="empty">거래내역이 없습니다</div>';
+
+  document.getElementById('view-content').innerHTML = `
+    <div class="dashboard">
+      <div class="summary-hero">
+        <div class="summary-label">${currentDept === 'all' ? '전체 잔액' : DEPTS[currentDept]?.label + ' 잔액'}</div>
+        <div class="summary-balance ${s.balance < 0 ? 'neg' : ''}">${fmt(s.balance)}</div>
+        <div class="summary-row">
+          <div class="summary-item inc">↑ 수입 ${fmt(s.income)}</div>
+          <div class="summary-item exp">↓ 지출 ${fmt(s.expense)}</div>
+        </div>
+      </div>
+      ${currentDept === 'all' ? `<div class="section-title">부서별 현황</div><div class="dept-cards">${deptCards}</div>` : ''}
+      <div class="section-title">최근 거래</div>
+      <div class="tx-list">${recentHtml}</div>
+      ${filtered.length > 5 ? `<button class="more-btn" onclick="switchView('transactions')">전체 보기 →</button>` : ''}
+    </div>`;
+}
+
+// --- Transactions ---
+function renderTransactions() {
+  const filtered = getFiltered();
+  const s = calcSummary(filtered);
+
+  const html = filtered.length ? filtered.map(t => txRow(t, true)).join('')
+    : '<div class="empty">거래내역이 없습니다</div>';
+
+  document.getElementById('view-content').innerHTML = `
+    <div class="tx-summary-bar">
+      <span class="inc">수입 ${fmt(s.income)}</span>
+      <span class="exp">지출 ${fmt(s.expense)}</span>
+      <span class="bal">잔액 ${fmt(s.balance)}</span>
+    </div>
+    <div class="tx-list">${html}</div>`;
+}
+
+function txRow(t, showDelete = false) {
+  const deptInfo = DEPTS[t.dept];
+  const isIncome = t.type === 'income';
+  return `
+    <div class="tx-row" onclick="showTxDetail('${t.id}')">
+      <div class="tx-dept-dot" style="background:${deptInfo?.color || '#aaa'}"></div>
+      <div class="tx-info">
+        <div class="tx-desc">${t.description}</div>
+        <div class="tx-meta">${fmtDate(t.date)} · ${deptInfo?.icon || ''} ${deptInfo?.label || ''} · ${t.category || ''}</div>
+      </div>
+      <div class="tx-amount ${isIncome ? 'inc' : 'exp'}">${isIncome ? '+' : '-'}${fmt(t.amount)}</div>
+      ${showDelete ? `<button class="tx-del" onclick="event.stopPropagation();deleteTransaction('${t.id}')">✕</button>` : ''}
+    </div>`;
+}
+
+// --- Budget ---
+function renderBudget() {
+  let html = '';
+  for (const [key, info] of Object.entries(DEPTS)) {
+    const b = budgets[key] || {};
+    const spent = transactions.filter(t => t.dept === key && t.type === 'expense')
+                             .reduce((s, t) => s + t.amount, 0);
+    const total = b.total || 0;
+    const pct = total ? Math.min(100, (spent / total * 100)).toFixed(1) : 0;
+    const cats = b.categories || [];
+
+    html += `
+      <div class="budget-section">
+        <div class="budget-dept-header" style="color:${info.color}">${info.icon} ${info.label}</div>
+        <div class="budget-total-row">
+          <span>총 예산</span>
+          <input class="budget-input" type="number" value="${total}" 
+            onchange="updateBudgetField('${key}','total',this.value)" placeholder="0">원
+        </div>
+        <div class="budget-bar-wrap">
+          <div class="budget-bar" style="--pct:${pct}%;--color:${info.color}"></div>
+          <span class="budget-pct">${pct}% 사용 (${fmt(spent)} / ${fmt(total)})</span>
+        </div>
+        <div class="budget-cats">
+          ${cats.map((c, i) => `
+            <div class="budget-cat-row">
+              <input class="budget-cat-name" value="${c.name}" 
+                onchange="updateBudgetCat('${key}',${i},'name',this.value)" placeholder="항목명">
+              <input class="budget-input sm" type="number" value="${c.amount}"
+                onchange="updateBudgetCat('${key}',${i},'amount',this.value)" placeholder="0">원
+              <button class="cat-del" onclick="removeBudgetCat('${key}',${i})">✕</button>
+            </div>`).join('')}
+          <button class="add-cat-btn" onclick="addBudgetCat('${key}')">+ 항목 추가</button>
+        </div>
+      </div>`;
+  }
+
+  document.getElementById('view-content').innerHTML = `
+    <div class="budget-page">
+      ${html}
+      <button class="save-budget-btn" onclick="saveBudgetFromForm()">💾 예산 저장</button>
+    </div>`;
+}
+
+// Budget helpers
+window._budgetDraft = {};
+function updateBudgetField(dept, field, val) {
+  if (!window._budgetDraft[dept]) window._budgetDraft[dept] = JSON.parse(JSON.stringify(budgets[dept] || {}));
+  window._budgetDraft[dept][field] = Number(val);
+}
+function updateBudgetCat(dept, idx, field, val) {
+  if (!window._budgetDraft[dept]) window._budgetDraft[dept] = JSON.parse(JSON.stringify(budgets[dept] || {}));
+  window._budgetDraft[dept].categories[idx][field] = field === 'amount' ? Number(val) : val;
+}
+function addBudgetCat(dept) {
+  if (!budgets[dept]) budgets[dept] = { categories: [] };
+  if (!budgets[dept].categories) budgets[dept].categories = [];
+  budgets[dept].categories.push({ name: '', amount: 0 });
+  renderBudget();
+}
+function removeBudgetCat(dept, idx) {
+  budgets[dept].categories.splice(idx, 1);
+  renderBudget();
+}
+function saveBudgetFromForm() {
+  // Merge draft into budgets
+  const merged = JSON.parse(JSON.stringify(budgets));
+  for (const [k, v] of Object.entries(window._budgetDraft)) {
+    merged[k] = { ...merged[k], ...v };
+  }
+  window._budgetDraft = {};
+  saveBudgets(merged);
+}
+
+// --- Reports ---
+function renderReports() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = now.getMonth();
+
+  // Monthly breakdown
+  let monthlyHtml = '';
+  for (let m = 0; m < 12; m++) {
+    const mTx = transactions.filter(t => {
+      const d = t.date?.toDate ? t.date.toDate() : new Date(t.date);
+      return d.getFullYear() === year && d.getMonth() === m &&
+        (currentDept === 'all' || t.dept === currentDept);
+    });
+    if (!mTx.length) continue;
+    const s = calcSummary(mTx);
+    monthlyHtml += `
+      <div class="report-row ${m === month ? 'current-month' : ''}">
+        <span class="report-month">${m+1}월</span>
+        <span class="inc">+${fmt(s.income)}</span>
+        <span class="exp">-${fmt(s.expense)}</span>
+        <span class="bal ${s.balance < 0 ? 'neg' : ''}">${fmt(s.balance)}</span>
+      </div>`;
+  }
+
+  // Category breakdown
+  const filtered = getFiltered();
+  const cats = {};
+  filtered.filter(t => t.type === 'expense').forEach(t => {
+    cats[t.category || '기타'] = (cats[t.category || '기타'] || 0) + t.amount;
+  });
+  const catHtml = Object.entries(cats).sort((a,b)=>b[1]-a[1]).map(([c, amt]) => `
+    <div class="cat-report-row">
+      <span>${c}</span>
+      <span class="exp">${fmt(amt)}</span>
+    </div>`).join('') || '<div class="empty">데이터 없음</div>';
+
+  document.getElementById('view-content').innerHTML = `
+    <div class="reports-page">
+      <div class="section-title">${year}년 월별 현황</div>
+      <div class="report-header-row">
+        <span></span><span>수입</span><span>지출</span><span>잔액</span>
+      </div>
+      ${monthlyHtml || '<div class="empty">데이터 없음</div>'}
+
+      <div class="section-title" style="margin-top:24px">지출 항목별 현황</div>
+      ${catHtml}
+
+      <button class="print-btn" onclick="printReport()">🖨️ 결산서 인쇄 / PDF</button>
+    </div>`;
+}
+
+// ============================================================
+// 거래 추가 모달
+// ============================================================
+function showAddTx() {
+  const today = new Date().toISOString().split('T')[0];
+  const deptOpts = Object.entries(DEPTS).map(([k, v]) =>
+    `<option value="${k}" ${currentDept === k ? 'selected' : ''}>${v.icon} ${v.label}</option>`).join('');
+  const catOpts = ['헌금','특별헌금','행사비','식비','교재비','교통비','기타'].map(c =>
+    `<option value="${c}">${c}</option>`).join('');
+
+  showModal(`
+    <h3 class="modal-title">거래 추가</h3>
+    <div class="form-group">
+      <label>구분</label>
+      <div class="type-toggle">
+        <button class="type-btn active" id="btn-income" onclick="toggleType('income')">수입</button>
+        <button class="type-btn" id="btn-expense" onclick="toggleType('expense')">지출</button>
+      </div>
+    </div>
+    <div class="form-group">
+      <label>부서</label>
+      <select id="f-dept">${deptOpts}</select>
+    </div>
+    <div class="form-group">
+      <label>날짜</label>
+      <input type="date" id="f-date" value="${today}">
+    </div>
+    <div class="form-group">
+      <label>금액</label>
+      <input type="number" id="f-amount" placeholder="0" inputmode="numeric">
+    </div>
+    <div class="form-group">
+      <label>항목</label>
+      <select id="f-cat">${catOpts}</select>
+    </div>
+    <div class="form-group">
+      <label>내용</label>
+      <input type="text" id="f-desc" placeholder="거래 내용">
+    </div>
+    <div class="form-group">
+      <label>비고</label>
+      <input type="text" id="f-note" placeholder="선택사항">
+    </div>
+    <button class="modal-submit" onclick="submitTx()">추가</button>
+  `);
+}
+
+let _txType = 'income';
+window.toggleType = function(t) {
+  _txType = t;
+  document.getElementById('btn-income').classList.toggle('active', t === 'income');
+  document.getElementById('btn-expense').classList.toggle('active', t === 'expense');
+};
+
+window.submitTx = async function() {
+  const amount = parseInt(document.getElementById('f-amount').value);
+  if (!amount || isNaN(amount)) { showToast('금액을 입력해주세요'); return; }
+  const desc = document.getElementById('f-desc').value.trim();
+  if (!desc) { showToast('내용을 입력해주세요'); return; }
+
+  try {
+    await addTransaction({
+      type: _txType,
+      dept: document.getElementById('f-dept').value,
+      date: document.getElementById('f-date').value,
+      amount,
+      category: document.getElementById('f-cat').value,
+      description: desc,
+      note: document.getElementById('f-note').value,
+    });
+    hideModal();
+    showToast('거래가 추가되었습니다 ✓');
+  } catch(e) {
+    showToast('오류: ' + e.message);
+  }
+};
+
+// 상세 보기
+window.showTxDetail = function(id) {
+  const t = transactions.find(x => x.id === id);
+  if (!t) return;
+  const deptInfo = DEPTS[t.dept];
+  showModal(`
+    <h3 class="modal-title">거래 상세</h3>
+    <div class="detail-grid">
+      <div class="detail-row"><span>구분</span><span class="${t.type === 'income' ? 'inc' : 'exp'}">${t.type === 'income' ? '수입' : '지출'}</span></div>
+      <div class="detail-row"><span>부서</span><span>${deptInfo?.icon} ${deptInfo?.label}</span></div>
+      <div class="detail-row"><span>날짜</span><span>${fmtDateFull(t.date)}</span></div>
+      <div class="detail-row"><span>금액</span><span class="${t.type === 'income' ? 'inc' : 'exp'} big">${t.type === 'income' ? '+' : '-'}${fmt(t.amount)}</span></div>
+      <div class="detail-row"><span>항목</span><span>${t.category || '-'}</span></div>
+      <div class="detail-row"><span>내용</span><span>${t.description}</span></div>
+      ${t.note ? `<div class="detail-row"><span>비고</span><span>${t.note}</span></div>` : ''}
+    </div>
+    <button class="modal-delete" onclick="deleteTransaction('${t.id}');hideModal()">🗑️ 삭제</button>
+  `);
+};
+
+// ============================================================
+// 인쇄
+// ============================================================
+window.printReport = function() {
+  const filtered = getFiltered();
+  const s = calcSummary(filtered);
+  const deptLabel = currentDept === 'all' ? '전체' : DEPTS[currentDept]?.label;
+  const now = new Date();
+  const yearMonth = `${now.getFullYear()}년 ${now.getMonth()+1}월`;
+
+  const rows = filtered.map(t => `
+    <tr>
+      <td>${fmtDateFull(t.date)}</td>
+      <td>${DEPTS[t.dept]?.label}</td>
+      <td>${t.category || '-'}</td>
+      <td>${t.description}</td>
+      <td style="color:#2d7a2d">${t.type === 'income' ? fmt(t.amount) : ''}</td>
+      <td style="color:#c0392b">${t.type === 'expense' ? fmt(t.amount) : ''}</td>
+    </tr>`).join('');
+
+  const win = window.open('', '_blank');
+  win.document.write(`
+    <!DOCTYPE html><html lang="ko"><head>
+    <meta charset="UTF-8">
+    <title>${deptLabel} 결산서 - ${yearMonth}</title>
+    <style>
+      body { font-family: 'Malgun Gothic', sans-serif; padding: 40px; color: #111; }
+      h1 { text-align:center; font-size:22px; margin-bottom:4px; }
+      .sub { text-align:center; color:#666; margin-bottom:24px; }
+      table { width:100%; border-collapse:collapse; font-size:13px; }
+      th { background:#1a2744; color:#fff; padding:8px 6px; }
+      td { border-bottom:1px solid #e0e0e0; padding:7px 6px; }
+      tr:nth-child(even) td { background:#f8f8f8; }
+      .summary { margin-top:24px; display:flex; gap:24px; justify-content:flex-end; }
+      .sum-box { border:2px solid #1a2744; padding:12px 20px; border-radius:8px; text-align:right; }
+      .sum-label { font-size:12px; color:#666; }
+      .sum-val { font-size:18px; font-weight:700; }
+      @media print { button { display:none; } }
+    </style>
+    </head><body>
+    <h1>📋 결산서</h1>
+    <div class="sub">${deptLabel} · ${yearMonth} 기준</div>
+    <table>
+      <thead><tr><th>날짜</th><th>부서</th><th>항목</th><th>내용</th><th>수입</th><th>지출</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="summary">
+      <div class="sum-box"><div class="sum-label">총 수입</div><div class="sum-val" style="color:#2d7a2d">${fmt(s.income)}</div></div>
+      <div class="sum-box"><div class="sum-label">총 지출</div><div class="sum-val" style="color:#c0392b">${fmt(s.expense)}</div></div>
+      <div class="sum-box"><div class="sum-label">잔액</div><div class="sum-val">${fmt(s.balance)}</div></div>
+    </div>
+    <br><button onclick="window.print()">🖨️ 인쇄 / PDF 저장</button>
+    </body></html>`);
+  win.document.close();
+};
+
+// ============================================================
+// 전역 nav
+// ============================================================
+window.switchDept = function(dept) {
+  currentDept = dept;
+  renderAll();
+};
+window.switchView = function(view) {
+  currentView = view;
+  document.querySelectorAll('.nav-btn').forEach(el => el.classList.toggle('active', el.dataset.view === view));
+  renderAll();
+};
+
+// ============================================================
+// Modal & Toast
+// ============================================================
+function showModal(html) {
+  document.getElementById('modal-body').innerHTML = html;
+  document.getElementById('modal').classList.add('open');
+  _txType = 'income';
+}
+window.hideModal = function() {
+  document.getElementById('modal').classList.remove('open');
+};
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2500);
+}
+
+// ============================================================
+// Auth handlers
+// ============================================================
+window.doLogin = async function() {
+  const email = document.getElementById('login-email').value;
+  const pw = document.getElementById('login-pw').value;
+  try {
+    await signInWithEmailAndPassword(auth, email, pw);
+  } catch(e) {
+    showAuthError('이메일 또는 비밀번호가 올바르지 않습니다.');
+  }
+};
+window.doRegister = async function() {
+  const email = document.getElementById('login-email').value;
+  const pw = document.getElementById('login-pw').value;
+  try {
+    await createUserWithEmailAndPassword(auth, email, pw);
+  } catch(e) {
+    showAuthError(e.message);
+  }
+};
+window.doLogout = async function() {
+  if (confirm('로그아웃 하시겠습니까?')) await signOut(auth);
+};
+function showAuthError(msg) {
+  document.getElementById('auth-error').textContent = msg;
+}
+
+// ============================================================
+// FAB & Add button
+// ============================================================
+window.showAddTx = showAddTx;
+
+</script>
+
+<style>
+/* ============================================================
+   Design: Clean & trustworthy — navy + warm whites
+   Font: Noto Sans KR for Korean readability
+   ============================================================ */
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --navy: #1a2744;
+  --navy2: #243260;
+  --gold: #c9a84c;
+  --blue: #4f86f7;
+  --orange: #f7934f;
+  --inc: #2d8a4e;
+  --exp: #c0392b;
+  --bg: #f0f2f7;
+  --card: #ffffff;
+  --text: #1a1a2e;
+  --muted: #7a7a9a;
+  --border: #e2e5ef;
+  --radius: 14px;
+  --shadow: 0 2px 12px rgba(26,39,68,.10);
+}
+
+body {
+  font-family: 'Noto Sans KR', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100dvh;
+}
+
+/* ============================================================ AUTH */
+#auth-screen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100dvh;
+  background: linear-gradient(135deg, var(--navy) 0%, #2c4a8c 100%);
+}
+.auth-box {
+  background: white;
+  border-radius: 24px;
+  padding: 40px 36px;
+  width: min(400px, 92vw);
+  box-shadow: 0 20px 60px rgba(0,0,0,.3);
+}
+.auth-logo {
+  text-align: center;
+  margin-bottom: 28px;
+}
+.auth-logo .logo-icon {
+  font-size: 48px;
+  display: block;
+  margin-bottom: 8px;
+}
+.auth-logo h1 {
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--navy);
+}
+.auth-logo p { font-size: 13px; color: var(--muted); margin-top: 2px; }
+.auth-box input {
+  width: 100%;
+  padding: 13px 16px;
+  border: 2px solid var(--border);
+  border-radius: 10px;
+  font-size: 15px;
+  font-family: inherit;
+  margin-bottom: 12px;
+  outline: none;
+  transition: border-color .2s;
+}
+.auth-box input:focus { border-color: var(--navy); }
+.auth-btns { display: flex; gap: 10px; margin-top: 4px; }
+.auth-btn {
+  flex: 1; padding: 13px; border: none; border-radius: 10px;
+  font-size: 15px; font-family: inherit; font-weight: 600; cursor: pointer;
+  transition: opacity .2s;
+}
+.auth-btn:hover { opacity: .88; }
+.auth-btn.primary { background: var(--navy); color: white; }
+.auth-btn.secondary { background: var(--border); color: var(--navy); }
+#auth-error { color: var(--exp); font-size: 13px; margin-top: 10px; text-align: center; min-height: 18px; }
+
+/* ============================================================ APP LAYOUT */
+#app-screen {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+}
+
+/* Top bar */
+.topbar {
+  background: var(--navy);
+  color: white;
+  padding: 14px 20px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.topbar-logo { font-size: 20px; font-weight: 700; flex: 1; }
+.topbar-logo span { font-size: 13px; font-weight: 400; opacity: .7; margin-left: 6px; }
+.topbar-user { font-size: 12px; opacity: .75; }
+.logout-btn { background: rgba(255,255,255,.15); border: none; color: white;
+  padding: 6px 12px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+
+/* Dept tabs */
+.dept-tabs {
+  background: var(--navy2);
+  display: flex;
+  padding: 8px 16px;
+  gap: 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.dept-tab {
+  background: rgba(255,255,255,.12);
+  border: none;
+  color: rgba(255,255,255,.75);
+  padding: 7px 16px;
+  border-radius: 20px;
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all .2s;
+}
+.dept-tab.active {
+  background: white;
+  color: var(--navy);
+  font-weight: 700;
+}
+
+/* Main */
+main {
+  flex: 1;
+  padding: 16px 16px 100px;
+  max-width: 700px;
+  width: 100%;
+  margin: 0 auto;
+}
+
+/* Bottom nav */
+.bottom-nav {
+  position: fixed;
+  bottom: 0; left: 0; right: 0;
+  background: white;
+  border-top: 1px solid var(--border);
+  display: flex;
+  padding: 8px 0 max(8px, env(safe-area-inset-bottom));
+  z-index: 100;
+}
+.nav-btn {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  gap: 3px; border: none; background: none; cursor: pointer;
+  font-family: inherit; color: var(--muted); font-size: 10px; font-weight: 500;
+  padding: 4px;
+  transition: color .2s;
+}
+.nav-btn .nav-icon { font-size: 22px; }
+.nav-btn.active { color: var(--navy); }
+.nav-btn.active .nav-icon { transform: scale(1.08); }
+
+/* FAB */
+.fab {
+  position: fixed;
+  bottom: 76px;
+  right: 20px;
+  width: 54px; height: 54px;
+  background: var(--gold);
+  color: white;
+  border: none;
+  border-radius: 50%;
+  font-size: 26px;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(201,168,76,.4);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 101;
+  transition: transform .2s;
+}
+.fab:active { transform: scale(.92); }
+
+/* ============================================================ DASHBOARD */
+.summary-hero {
+  background: linear-gradient(135deg, var(--navy) 0%, #2c4a8c 100%);
+  color: white;
+  border-radius: var(--radius);
+  padding: 24px;
+  margin-bottom: 20px;
+  text-align: center;
+}
+.summary-label { font-size: 13px; opacity: .75; }
+.summary-balance { font-size: 34px; font-weight: 700; margin: 6px 0; letter-spacing: -.5px; }
+.summary-balance.neg { color: #ff8a8a; }
+.summary-row { display: flex; gap: 20px; justify-content: center; margin-top: 10px; }
+.summary-item { font-size: 13px; opacity: .85; }
+
+.dept-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }
+.dept-card {
+  background: white;
+  border-radius: var(--radius);
+  padding: 16px;
+  cursor: pointer;
+  border-left: 4px solid var(--dept-color);
+  box-shadow: var(--shadow);
+  transition: transform .15s;
+}
+.dept-card:active { transform: scale(.97); }
+.dept-card-header { font-size: 13px; font-weight: 600; color: var(--dept-color); margin-bottom: 8px; }
+.dept-card-balance { font-size: 20px; font-weight: 700; margin-bottom: 8px; }
+.dept-card-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); }
+
+.section-title { font-size: 14px; font-weight: 700; color: var(--navy); margin-bottom: 10px; }
+
+/* ============================================================ TX LIST */
+.tx-list { background: white; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow); }
+.tx-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background .15s;
+}
+.tx-row:last-child { border-bottom: none; }
+.tx-row:active { background: var(--bg); }
+.tx-dept-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.tx-info { flex: 1; min-width: 0; }
+.tx-desc { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tx-meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
+.tx-amount { font-size: 14px; font-weight: 700; white-space: nowrap; }
+.tx-del { background: none; border: none; color: var(--muted); font-size: 14px; cursor: pointer; padding: 4px; }
+
+.tx-summary-bar {
+  background: var(--navy);
+  color: white;
+  display: flex;
+  gap: 16px;
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.more-btn {
+  width: 100%; margin-top: 10px; padding: 11px;
+  background: white; border: 2px solid var(--border);
+  border-radius: 10px; font-family: inherit; font-size: 13px;
+  color: var(--navy); font-weight: 600; cursor: pointer;
+}
+
+.empty { padding: 24px; text-align: center; color: var(--muted); font-size: 14px; }
+
+/* ============================================================ BUDGET */
+.budget-page { display: flex; flex-direction: column; gap: 16px; }
+.budget-section {
+  background: white; border-radius: var(--radius); padding: 18px; box-shadow: var(--shadow);
+}
+.budget-dept-header { font-size: 16px; font-weight: 700; margin-bottom: 12px; }
+.budget-total-row { display: flex; align-items: center; gap: 8px; font-size: 14px; margin-bottom: 10px; }
+.budget-input { border: 2px solid var(--border); border-radius: 8px; padding: 7px 10px;
+  font-size: 14px; font-family: inherit; width: 130px; outline: none; }
+.budget-input:focus { border-color: var(--navy); }
+.budget-input.sm { width: 100px; }
+.budget-bar-wrap { margin-bottom: 12px; }
+.budget-bar {
+  height: 8px; background: var(--border); border-radius: 4px; margin-bottom: 4px; overflow: hidden;
+}
+.budget-bar::before {
+  content: ''; display: block; height: 100%;
+  width: var(--pct); background: var(--color);
+  border-radius: 4px; transition: width .4s;
+}
+.budget-pct { font-size: 12px; color: var(--muted); }
+.budget-cat-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.budget-cat-name { border: 2px solid var(--border); border-radius: 8px; padding: 6px 10px;
+  font-size: 13px; font-family: inherit; flex: 1; outline: none; }
+.cat-del { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 16px; }
+.add-cat-btn { background: var(--bg); border: 2px dashed var(--border); border-radius: 8px;
+  padding: 7px 14px; font-size: 13px; font-family: inherit; color: var(--muted); cursor: pointer; width: 100%; }
+.save-budget-btn {
+  background: var(--navy); color: white; border: none; border-radius: 12px;
+  padding: 14px; font-size: 15px; font-family: inherit; font-weight: 700; cursor: pointer;
+}
+
+/* ============================================================ REPORTS */
+.reports-page { display: flex; flex-direction: column; gap: 4px; }
+.report-header-row {
+  display: grid; grid-template-columns: 60px 1fr 1fr 1fr;
+  padding: 6px 14px; font-size: 12px; color: var(--muted); font-weight: 600;
+}
+.report-row {
+  display: grid; grid-template-columns: 60px 1fr 1fr 1fr;
+  background: white; padding: 11px 14px; border-radius: 8px;
+  font-size: 13px; box-shadow: var(--shadow);
+}
+.report-row.current-month { border: 2px solid var(--navy); }
+.report-month { font-weight: 700; color: var(--navy); }
+.cat-report-row {
+  display: flex; justify-content: space-between;
+  background: white; padding: 11px 14px; border-radius: 8px;
+  font-size: 13px; box-shadow: var(--shadow);
+}
+.print-btn {
+  margin-top: 16px; background: var(--navy); color: white; border: none;
+  border-radius: 12px; padding: 14px; font-size: 15px; font-family: inherit;
+  font-weight: 700; cursor: pointer; width: 100%;
+}
+
+/* ============================================================ MODAL */
+.modal-overlay {
+  position: fixed; inset: 0; background: rgba(0,0,0,.45);
+  display: none; align-items: flex-end; justify-content: center;
+  z-index: 200;
+}
+.modal-overlay.open { display: flex; }
+.modal-box {
+  background: white; border-radius: 24px 24px 0 0;
+  width: 100%; max-width: 700px;
+  padding: 28px 24px max(28px, env(safe-area-inset-bottom));
+  max-height: 90dvh; overflow-y: auto;
+}
+.modal-title { font-size: 18px; font-weight: 700; margin-bottom: 20px; }
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 12px; font-weight: 600; color: var(--muted); margin-bottom: 5px; }
+.form-group select, .form-group input[type=text], .form-group input[type=date],
+.form-group input[type=number] {
+  width: 100%; padding: 11px 14px; border: 2px solid var(--border);
+  border-radius: 10px; font-size: 15px; font-family: inherit; outline: none;
+}
+.form-group select:focus, .form-group input:focus { border-color: var(--navy); }
+.type-toggle { display: flex; gap: 8px; }
+.type-btn {
+  flex: 1; padding: 10px; border: 2px solid var(--border);
+  border-radius: 10px; font-family: inherit; font-size: 14px; font-weight: 600;
+  cursor: pointer; background: white; color: var(--muted); transition: all .2s;
+}
+.type-btn.active { border-color: var(--navy); background: var(--navy); color: white; }
+.modal-submit {
+  width: 100%; margin-top: 8px; padding: 14px; background: var(--navy); color: white;
+  border: none; border-radius: 12px; font-size: 16px; font-family: inherit; font-weight: 700; cursor: pointer;
+}
+.modal-delete {
+  width: 100%; margin-top: 12px; padding: 12px; background: white; color: var(--exp);
+  border: 2px solid var(--exp); border-radius: 12px; font-size: 14px; font-family: inherit; font-weight: 600; cursor: pointer;
+}
+.detail-grid { display: flex; flex-direction: column; gap: 0; }
+.detail-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 12px 0; border-bottom: 1px solid var(--border); font-size: 14px;
+}
+.detail-row span:first-child { color: var(--muted); }
+.detail-row .big { font-size: 20px; font-weight: 700; }
+
+/* ============================================================ UTILS */
+.inc { color: var(--inc); }
+.exp { color: var(--exp); }
+.bal { font-weight: 700; }
+.neg { color: var(--exp); }
+
+/* Toast */
+#toast {
+  position: fixed; bottom: 90px; left: 50%; transform: translateX(-50%) translateY(20px);
+  background: rgba(26,39,68,.95); color: white; padding: 10px 20px;
+  border-radius: 20px; font-size: 13px; opacity: 0; transition: all .25s; z-index: 300;
+  pointer-events: none; white-space: nowrap;
+}
+#toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* Desktop breakpoint */
+@media (min-width: 700px) {
+  .dept-cards { grid-template-columns: 1fr 1fr; }
+  .bottom-nav { left: 50%; transform: translateX(-50%); max-width: 700px; border-radius: 20px 20px 0 0; border: 1px solid var(--border); border-bottom: none; }
+  main { padding-bottom: 110px; }
+}
+</style>
+</head>
+<body>
+
+<!-- AUTH -->
+<div id="auth-screen">
+  <div class="auth-box">
+    <div class="auth-logo">
+      <span class="logo-icon">✝️</span>
+      <h1>은혜 회계</h1>
+      <p>교회 재정 관리 시스템</p>
+    </div>
+    <input type="email" id="login-email" placeholder="이메일 주소" autocomplete="email">
+    <input type="password" id="login-pw" placeholder="비밀번호" autocomplete="current-password"
+      onkeydown="if(event.key==='Enter')doLogin()">
+    <div class="auth-btns">
+      <button class="auth-btn primary" onclick="doLogin()">로그인</button>
+      <button class="auth-btn secondary" onclick="doRegister()">회원가입</button>
+    </div>
+    <div id="auth-error"></div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app-screen" style="display:none; flex-direction:column; min-height:100dvh;">
+
+  <!-- Topbar -->
+  <header class="topbar">
+    <div class="topbar-logo">✝️ 은혜 회계 <span>재정관리</span></div>
+    <span class="topbar-user" id="user-email"></span>
+    <button class="logout-btn" onclick="doLogout()">로그아웃</button>
+  </header>
+
+  <!-- Dept tabs -->
+  <div class="dept-tabs">
+    <button class="dept-tab active" data-dept="all" onclick="switchDept('all')">🏛️ 전체</button>
+    <button class="dept-tab" data-dept="student" onclick="switchDept('student')">📚 학생부</button>
+    <button class="dept-tab" data-dept="praise" onclick="switchDept('praise')">🎵 학생찬양팀</button>
+  </div>
+
+  <!-- Main -->
+  <main>
+    <div id="view-content"></div>
+  </main>
+
+  <!-- Bottom Nav -->
+  <nav class="bottom-nav">
+    <button class="nav-btn active" data-view="dashboard" onclick="switchView('dashboard')">
+      <span class="nav-icon">🏠</span>홈
+    </button>
+    <button class="nav-btn" data-view="transactions" onclick="switchView('transactions')">
+      <span class="nav-icon">📋</span>거래
+    </button>
+    <button class="nav-btn" data-view="budget" onclick="switchView('budget')">
+      <span class="nav-icon">💰</span>예산
+    </button>
+    <button class="nav-btn" data-view="reports" onclick="switchView('reports')">
+      <span class="nav-icon">📊</span>결산
+    </button>
+  </nav>
+
+  <!-- FAB -->
+  <button class="fab" onclick="showAddTx()">+</button>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal" onclick="if(event.target===this)hideModal()">
+  <div class="modal-box" id="modal-body"></div>
+</div>
+
+<!-- Toast -->
+<div id="toast"></div>
+
+</body>
+</html>
