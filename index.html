@@ -396,13 +396,15 @@ function showAddTx() {
 }
 
 let _txType = 'income';
-window.toggleType = function(t) {
+function toggleType(t) {
   _txType = t;
   document.getElementById('btn-income').classList.toggle('active', t === 'income');
   document.getElementById('btn-expense').classList.toggle('active', t === 'expense');
 };
 
-window.submitTx = async function() {
+window.toggleType = toggleType;
+
+async function submitTx() {
   const amount = parseInt(document.getElementById('f-amount').value);
   if (!amount || isNaN(amount)) { showToast('금액을 입력해주세요'); return; }
   const desc = document.getElementById('f-desc').value.trim();
@@ -425,8 +427,10 @@ window.submitTx = async function() {
   }
 };
 
+window.submitTx = submitTx;
+
 // 상세 보기
-window.showTxDetail = function(id) {
+function showTxDetail(id) {
   const t = transactions.find(x => x.id === id);
   if (!t) return;
   const deptInfo = DEPTS[t.dept];
@@ -448,7 +452,7 @@ window.showTxDetail = function(id) {
 // ============================================================
 // 인쇄
 // ============================================================
-window.printReport = function() {
+function printReport() {
   const filtered = getFiltered();
   const s = calcSummary(filtered);
   const deptLabel = currentDept === 'all' ? '전체' : DEPTS[currentDept]?.label;
@@ -504,15 +508,15 @@ window.printReport = function() {
 // ============================================================
 // 전역 nav
 // ============================================================
-window.switchDept = function(dept) {
+function switchDept(dept) {
   currentDept = dept;
   renderAll();
-};
-window.switchView = function(view) {
+}
+function switchView(view) {
   currentView = view;
   document.querySelectorAll('.nav-btn').forEach(el => el.classList.toggle('active', el.dataset.view === view));
   renderAll();
-};
+}
 
 // ============================================================
 // Modal & Toast
@@ -535,7 +539,7 @@ function showToast(msg) {
 // ============================================================
 // Auth handlers
 // ============================================================
-window.doLogin = async function() {
+async function doLogin() {
   const email = document.getElementById('login-email').value;
   const pw = document.getElementById('login-pw').value;
   try {
@@ -543,27 +547,67 @@ window.doLogin = async function() {
   } catch(e) {
     showAuthError('이메일 또는 비밀번호가 올바르지 않습니다.');
   }
-};
-window.doRegister = async function() {
+}
+async function doRegister() {
   const email = document.getElementById('login-email').value;
   const pw = document.getElementById('login-pw').value;
+  if (pw.length < 6) { showAuthError('비밀번호는 6자 이상이어야 합니다.'); return; }
   try {
     await createUserWithEmailAndPassword(auth, email, pw);
   } catch(e) {
     showAuthError(e.message);
   }
-};
-window.doLogout = async function() {
+}
+async function doLogout() {
   if (confirm('로그아웃 하시겠습니까?')) await signOut(auth);
-};
+}
 function showAuthError(msg) {
   document.getElementById('auth-error').textContent = msg;
 }
 
 // ============================================================
-// FAB & Add button
+// DOM Event Bindings (모든 버튼을 여기서 바인딩)
 // ============================================================
+document.addEventListener('DOMContentLoaded', () => {
+  // Auth
+  document.getElementById('btn-login').addEventListener('click', doLogin);
+  document.getElementById('btn-register').addEventListener('click', doRegister);
+  document.getElementById('btn-logout').addEventListener('click', doLogout);
+  document.getElementById('login-pw').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doLogin();
+  });
+
+  // FAB
+  document.getElementById('btn-fab').addEventListener('click', showAddTx);
+
+  // Modal overlay 클릭으로 닫기
+  document.getElementById('modal').addEventListener('click', e => {
+    if (e.target === document.getElementById('modal')) hideModal();
+  });
+
+  // Dept tabs
+  document.querySelectorAll('.dept-tab').forEach(btn => {
+    btn.addEventListener('click', () => switchDept(btn.dataset.dept));
+  });
+
+  // Bottom nav
+  document.querySelectorAll('.nav-btn').forEach(btn => {
+    btn.addEventListener('click', () => switchView(btn.dataset.view));
+  });
+});
+
+window.hideModal = hideModal;
+window.switchDept = switchDept;
+window.switchView = switchView;
 window.showAddTx = showAddTx;
+window.deleteTransaction = deleteTransaction;
+window.showTxDetail = showTxDetail;
+window.printReport = printReport;
+window.addBudgetCat = addBudgetCat;
+window.removeBudgetCat = removeBudgetCat;
+window.saveBudgetFromForm = saveBudgetFromForm;
+window.updateBudgetField = updateBudgetField;
+window.updateBudgetCat = updateBudgetCat;
 
 </script>
 
@@ -962,10 +1006,10 @@ main {
     </div>
     <input type="email" id="login-email" placeholder="이메일 주소" autocomplete="email">
     <input type="password" id="login-pw" placeholder="비밀번호" autocomplete="current-password"
-      onkeydown="if(event.key==='Enter')doLogin()">
+      id="login-pw">
     <div class="auth-btns">
-      <button class="auth-btn primary" onclick="doLogin()">로그인</button>
-      <button class="auth-btn secondary" onclick="doRegister()">회원가입</button>
+      <button class="auth-btn primary" id="btn-login">로그인</button>
+      <button class="auth-btn secondary" id="btn-register">회원가입</button>
     </div>
     <div id="auth-error"></div>
   </div>
@@ -978,14 +1022,14 @@ main {
   <header class="topbar">
     <div class="topbar-logo">✝️ 은혜 회계 <span>재정관리</span></div>
     <span class="topbar-user" id="user-email"></span>
-    <button class="logout-btn" onclick="doLogout()">로그아웃</button>
+    <button class="logout-btn" id="btn-logout">로그아웃</button>
   </header>
 
   <!-- Dept tabs -->
   <div class="dept-tabs">
-    <button class="dept-tab active" data-dept="all" onclick="switchDept('all')">🏛️ 전체</button>
-    <button class="dept-tab" data-dept="student" onclick="switchDept('student')">📚 학생부</button>
-    <button class="dept-tab" data-dept="praise" onclick="switchDept('praise')">🎵 학생찬양팀</button>
+    <button class="dept-tab active" data-dept="all">🏛️ 전체</button>
+    <button class="dept-tab" data-dept="student">📚 학생부</button>
+    <button class="dept-tab" data-dept="praise">🎵 학생찬양팀</button>
   </div>
 
   <!-- Main -->
@@ -995,26 +1039,26 @@ main {
 
   <!-- Bottom Nav -->
   <nav class="bottom-nav">
-    <button class="nav-btn active" data-view="dashboard" onclick="switchView('dashboard')">
+    <button class="nav-btn active" data-view="dashboard">
       <span class="nav-icon">🏠</span>홈
     </button>
-    <button class="nav-btn" data-view="transactions" onclick="switchView('transactions')">
+    <button class="nav-btn" data-view="transactions">
       <span class="nav-icon">📋</span>거래
     </button>
-    <button class="nav-btn" data-view="budget" onclick="switchView('budget')">
+    <button class="nav-btn" data-view="budget">
       <span class="nav-icon">💰</span>예산
     </button>
-    <button class="nav-btn" data-view="reports" onclick="switchView('reports')">
+    <button class="nav-btn" data-view="reports">
       <span class="nav-icon">📊</span>결산
     </button>
   </nav>
 
   <!-- FAB -->
-  <button class="fab" onclick="showAddTx()">+</button>
+  <button class="fab" id="btn-fab">+</button>
 </div>
 
 <!-- Modal -->
-<div class="modal-overlay" id="modal" onclick="if(event.target===this)hideModal()">
+<div class="modal-overlay" id="modal">
   <div class="modal-box" id="modal-body"></div>
 </div>
 
